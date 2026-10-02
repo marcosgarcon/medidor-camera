@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Medidor Dimensional por Câmera</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: 'Segoe UI', system-ui, sans-serif; }
+    #container { position: relative; display: inline-block; max-width: 100%; }
+    #video, #photo { display: block; max-width: 100%; height: auto; }
+    #overlay { position: absolute; top: 0; left: 0; cursor: crosshair; touch-action: none; }
+    .tool-btn.active { @apply bg-blue-600 text-white ring-2 ring-blue-300; }
+    .point-marker {
+      position: absolute;
+      width: 12px; height: 12px;
+      border-radius: 50%;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      z-index: 10;
+      border: 2px solid white;
+      box-shadow: 0 0 0 1px rgba(0,0,0,0.5);
+    }
+    .hidden { display: none !important; }
+    #grid-canvas { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 1; opacity: 0.35; }
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 50;
+      display: flex; align-items: center; justify-content: center; padding: 1rem;
+    }
+    .modal-box {
+      background: white; border-radius: 1rem; max-width: 480px; width: 100%;
+      padding: 1.5rem; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.2);
+    }
+    .permission-step { display: flex; align-items: flex-start; gap: 0.75rem; margin-bottom: 0.75rem; }
+    .permission-step span { flex-shrink: 0; width: 1.5rem; height: 1.5rem; border-radius: 50%; background: #dbeafe; color: #1d4ed8; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.875rem; }
+    .switch { position: relative; display: inline-flex; align-items: center; cursor: pointer; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider { width: 2.5rem; height: 1.4rem; background: #d1d5db; border-radius: 9999px; position: relative; transition: 0.2s; }
+    .slider::before { content: ""; position: absolute; width: 1.1rem; height: 1.1rem; left: 0.15rem; top: 0.15rem; background: white; border-radius: 50%; transition: 0.2s; }
+    .switch input:checked + .slider { background: #2563eb; }
+    .switch input:checked + .slider::before { transform: translateX(1.1rem); }
+  </style>
+</head>
+<body class="bg-gray-50 min-h-screen p-4">
+
+<div class="max-w-5xl mx-auto">
+  <header class="mb-4">
+    <h1 class="text-2xl font-bold text-gray-800">📐 Medidor Dimensional por Câmera</h1>
+    <p class="text-sm text-gray-600">Meça ângulos e raios/diâmetros diretamente pela câmera. Calibre a escala antes de medir.</p>
+  </header>
+
+  <div class="flex flex-wrap gap-3 mb-4">
+    <button id="btn-start" class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 shadow">▶️ Iniciar Câmera</button>
+    <button id="btn-freeze" class="px-4 py-2 bg-gray-700 text-white rounded-lg hover:bg-gray-800 shadow hidden">📷 Congelar Frame</button>
+    <button id="btn-resume" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 shadow hidden">▶️ Retomar Câmera</button>
+    <button id="btn-file" class="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 shadow">📁 Abrir Imagem</button>
+    <input type="file" id="file-input" accept="image/*" class="hidden">
+  </div>
+
+  <div class="grid lg:grid-cols-3 gap-4">
+    <div class="lg:col-span-2 bg-black rounded-xl overflow-hidden shadow relative" id="viewport">
+      <div id="container">
+        <video id="video" autoplay playsinline muted class="hidden"></video>
+        <img id="photo" class="hidden" alt="captura">
+        <canvas id="overlay"></canvas>
+      </div>
+      <div id="empty-state" class="p-10 text-center text-white">
+        <p class="text-lg">Inicie a câmera ou carregue uma imagem para começar.</p>
+      </div>
+    </div>
+
+    <aside class="space-y-4">
+      <div class="bg-white p-4 rounded-xl shadow">
+        <h2 class="font-semibold text-gray-700 mb-3">Ferramenta</h2>
+        <div class="grid grid-cols-3 gap-2">
+          <button data-tool="angle" class="tool-btn active px-3 py-2 bg-gray-100 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-200">
+            Ângulo
+          </button>
+          <button data-tool="radius" class="tool-btn px-3 py-2 bg-gray-100 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-200">
+            Raio/Diâmetro
+          </button>
+          <button data-tool="distance" class="tool-btn px-3 py-2 bg-gray-100 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-200">
+            Distância
+          </button>
+        </div>
+        <p id="tool-help" class="text-xs text-gray-500 mt-3">Toque em 3 pontos para formar um ângulo (vértice no 2º ponto).</p>
+      </div>
+
+      <div class="bg-white p-4 rounded-xl shadow">
+        <h2 class="font-semibold text-gray-700 mb-3">Calibração de Escala</h2>
+        <p class="text-xs text-gray-500 mb-2">Defina uma distância real conhecida entre dois pontos.</p>
+        <div class="flex gap-2 mb-3">
+          <input type="number" id="real-dist" placeholder="Ex: 10" class="w-full border rounded-lg px-3 py-2 text-sm" value="10">
+          <select id="real-unit" class="border rounded-lg px-2 py-2 text-sm">
+            <option value="mm">mm</option>
+            <option value="cm" selected>cm</option>
+            <option value="m">m</option>
+            <option value="pol">pol</option>
+          </select>
+        </div>
+        <button id="btn-calibrate" class="w-full px-4 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 shadow mb-2">📏 Calibrar com 2 Pontos</button>
+        <button id="btn-auto-calibrate" class="w-full px-4 py-2 bg-indigo-50 text-indigo-700 rounded-lg hover:bg-indigo-100 text-sm shadow">🔍 Detectar Régua/Objeto Padrão</button>
+        <div id="calib-status" class="text-xs text-amber-700 mt-2 hidden">Toque em 2 pontos na imagem para calibrar.</div>
+      </div>
+
+      <div class="bg-white p-4 rounded-xl shadow">
+        <h2 class="font-semibold text-gray-700 mb-3">Visualização</h2>
+        <label class="switch">
+          <input type="checkbox" id="grid-toggle">
+          <span class="slider"></span>
+          <span class="ml-3 text-sm text-gray-700">Exibir grade de referência</span>
+        </label>
+        <p class="text-xs text-gray-500 mt-2">A grade ajuda a alinhar a peça e a manter a perpendicularidade.</p>
+      </div>
+
+      <div class="bg-white p-4 rounded-xl shadow">
+        <h2 class="font-semibold text-gray-700 mb-3">Resultados</h2>
+        <div id="results" class="space-y-2 text-sm">
+          <div class="text-gray-500">Nenhuma medição ainda.</div>
+        </div>
+        <div class="mt-3 pt-3 border-t text-xs text-gray-500">
+          <p>Escala: <span id="scale-display" class="font-mono font-semibold text-gray-700">não calibrada</span></p>
+          <p>Resolução: <span id="res-display" class="font-mono">-</span></p>
+        </div>
+      </div>
+
+      <div class="bg-white p-4 rounded-xl shadow">
+        <h2 class="font-semibold text-gray-700 mb-3">Ações</h2>
+        <div class="grid grid-cols-2 gap-2">
+          <button id="btn-undo" class="px-3 py-2 bg-gray-100 rounded-lg text-sm hover:bg-gray-200">↩️ Desfazer</button>
+          <button id="btn-clear" class="px-3 py-2 bg-red-50 text-red-600 rounded-lg text-sm hover:bg-red-100">🗑️ Limpar</button>
+        </div>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<script>
+  const video = document.getElementById('video');
+  const photo = document.getElementById('photo');
+  const overlay = document.getElementById('overlay');
+  const gridCanvas = document.getElementById('grid-canvas');
+  const ctx = overlay.getContext('2d');
+  const container = document.getElementById('container');
+  const emptyState = document.getElementById('empty-state');
+  
+  let stream = null;
+  let isFrozen = false;
+  let tool = 'angle';
+  let points = [];
+  let scalePxPerUnit = null;
+  let scaleUnit = 'cm';
+  let showGrid = false;
+  let autoCalibAttempts = 0;
+  
+  const TOOLS = {
+    angle: {
+      max: 3,
+      help: 'Toque em 3 pontos para formar um ângulo (vértice no 2º ponto).'
+    },
+    radius: {
+      max: 3,
+      help: 'Toque em 3 pontos sobre a circunferência para calcular o raio e diâmetro.'
+    },
+    distance: {
+      max: 2,
+      help: 'Toque em 2 pontos para medir a distância entre eles.'
+    }
+  };
+  
+  function resizeOverlay() {
+    const source = isFrozen || photo.src ? photo : video;
+    if (!source.videoWidth && !source.naturalWidth) return;
+    const w = source.videoWidth || source.naturalWidth;
+    const h = source.videoHeight || source.naturalHeight;
+    const rect = source.getBoundingClientRect();
+    overlay.width = rect.width;
+    overlay.height = rect.height;
+    gridCanvas.width = rect.width;
+    gridCanvas.height = rect.height;
+    container.style.width = rect.width + 'px';
+    container.style.height = rect.height + 'px';
+    drawGrid();
+    draw();
+  }
+  
+  function getPointerPos(evt) {
+    const rect = overlay.getBoundingClientRect();
+    const clientX = evt.touches ? evt.touches[0].clientX : evt.clientX;
+    const clientY = evt.touches ? evt.touches[0].clientY : evt.clientY;
+    return {
+      x: clientX - rect.left,
+      y: clientY - rect.top
+    };
+  }
+  
+  function toImageCoords(x, y) {
+    const source = isFrozen || photo.src ? photo : video;
+    const w = source.videoWidth || source.naturalWidth || overlay.width;
+    const h = source.videoHeight || source.naturalHeight || overlay.height;
+    return {
+      x: x * (w / overlay.width),
+      y: y * (h / overlay.height)
+    };
+  }
+  
+  function toOverlayCoords(x, y) {
+    const source = isFrozen || photo.src ? photo : video;
+    const w = source.videoWidth || source.naturalWidth || overlay.width;
+    const h = source.videoHeight || source.naturalHeight || overlay.height;
+    return {
+      x: x * (overlay.width / w),
+      y: y * (overlay.height / h)
+    };
+  }
+  
+  function drawGrid() {
+    const g = gridCanvas.getContext('2d');
+    g.clearRect(0, 0, gridCanvas.width, gridCanvas.height);
+    if (!showGrid) return;
+    gridCanvas.classList.remove('hidden');
+    const step = 50;
+    g.strokeStyle = 'rgba(255,255,255,0.4)';
+    g.lineWidth = 1;
+    for (let x = 0; x <= gridCanvas.width; x += step) {
+      g.beginPath(); g.moveTo(x, 0); g.lineTo(x, gridCanvas.height); g.stroke();
+    }
+    for (let y = 0; y <= gridCanvas.height; y += step) {
+      g.beginPath(); g.moveTo(0, y); g.lineTo(gridCanvas.width, y); g.stroke();
+    }
+    g.strokeStyle = 'rgba(239,68,68,0.5)';
+    g.lineWidth = 2;
+    g.beginPath(); g.moveTo(gridCanvas.width/2, 0); g.lineTo(gridCanvas.width/2, gridCanvas.height); g.stroke();
+    g.beginPath(); g.moveTo(0, gridCanvas.height/2); g.lineTo(gridCanvas.width, gridCanvas.height/2); g.stroke();
+  }
+  
+  function draw() {
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    if (points.length < 2) return;
+    
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#facc15';
+    ctx.fillStyle = '#facc15';
+    
+    const t = TOOLS[tool];
+    
+    for (let i = 0; i < points.length - 1; i++) {
+      const a = toOverlayCoords(points[i].x, points[i].y);
+      const b = toOverlayCoords(points[i+1].x, points[i+1].y);
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    }
+    
+    points.forEach((p, idx) => {
+      const pos = toOverlayCoords(p.x, p.y);
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, 5, 0, Math.PI * 2);
+      ctx.fillStyle = idx === 1 && tool === 'angle' ? '#ef4444' : '#3b82f6';
+      ctx.fill();
+      ctx.strokeStyle = 'white';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    });
+    
+    if (tool === 'angle' && points.length === 3) {
+      drawAngleArc();
+    } else if (tool === 'radius' && points.length === 3) {
+      drawCircleFit();
+    }
+  }
+  
+  function drawAngleArc() {
+    const a = toOverlayCoords(points[0].x, points[0].y);
+    const v = toOverlayCoords(points[1].x, points[1].y);
+    const b = toOverlayCoords(points[2].x, points[2].y);
+    
+    const angleA = Math.atan2(a.y - v.y, a.x - v.x);
+    const angleB = Math.atan2(b.y - v.y, b.x - v.x);
+    let sweep = angleB - angleA;
+    while (sweep <= -Math.PI) sweep += 2 * Math.PI;
+    while (sweep > Math.PI) sweep -= 2 * Math.PI;
+    
+    const radius = 40;
+    ctx.beginPath();
+    ctx.arc(v.x, v.y, radius, angleA, angleA + sweep, sweep < 0);
+    ctx.strokeStyle = '#ef4444';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  
+  function drawCircleFit() {
+    const a = points[0], b = points[1], c = points[2];
+    const center = circleCenter(a, b, c);
+    if (!center) return;
+    const r = dist(center, a);
+    const centerOv = toOverlayCoords(center.x, center.y);
+    const rOv = r * (overlay.width / (video.videoWidth || photo.naturalWidth || overlay.width));
+    
+    ctx.beginPath();
+    ctx.arc(centerOv.x, centerOv.y, rOv, 0, Math.PI * 2);
+    ctx.strokeStyle = '#10b981';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([5, 5]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    
+    ctx.beginPath();
+    ctx.arc(centerOv.x, centerOv.y, 4, 0, Math.PI * 2);
+    ctx.fillStyle = '#10b981';
+    ctx.fill();
+    ctx.stroke();
+  }
+  
+  function dist(a, b) {
+    return Math.hypot(a.x - b.x, a.y - b.y);
+  }
+  
+  function angleBetween(a, v, b) {
+    const va = { x: a.x - v.x, y: a.y - v.y };
+    const vb = { x: b.x - v.x, y: b.y - v.y };
+    const dot = va.x * vb.x + va.y * vb.y;
+    const mag = Math.hypot(va.x, va.y) * Math.hypot(vb.x, vb.y);
+    if (mag === 0) return 0;
+    return Math.acos(Math.max(-1, Math.min(1, dot / mag))) * (180 / Math.PI);
+  }
+  
+  function circleCenter(a, b, c) {
+    const d = 2 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+    if (Math.abs(d) < 1e-6) return null;
+    const ux = ((a.x * a.x + a.y * a.y) * (b.y - c.y) + (b.x * b.x + b.y * b.y) * (c.y - a.y) + (c.x * c.x + c.y * c.y) * (a.y - b.y)) / d;
+    const uy = ((a.x * a.x + a.y * a.y) * (c.x - b.x) + (b.x * b.x + b.y * b.y) * (a.x - c.x) + (c.x * c.x + c.y * c.y) * (b.x - a.x)) / d;
+    return { x: ux, y: uy };
+  }
+  
+  function formatReal(px) {
+    if (!scalePxPerUnit) return `${px.toFixed(1)} px`;
+    return `${(px / scalePxPerUnit).toFixed(3)} ${scaleUnit}`;
+  }
+  
+  function updateResults() {
+    const box = document.getElementById('results');
+    if (points.length === 0) {
+      box.innerHTML = '<div class="text-gray-500">Nenhuma medição ainda.</div>';
+      return;
+    }
+    
+    const t = TOOLS[tool];
+    if (points.length < t.max) {
+      box.innerHTML = `<div class="text-gray-500">${t.help}</div>`;
+      return;
+    }
+    
+    if (tool === 'angle') {
+      const deg = angleBetween(points[0], points[1], points[2]);
+      const rad = deg * (Math.PI / 180);
+      box.innerHTML = `
+        <div class="flex justify-between"><span>Ângulo:</span><span class="font-mono font-bold">${deg.toFixed(2)}°</span></div>
+        <div class="flex justify-between"><span>Radianos:</span><span class="font-mono">${rad.toFixed(4)} rad</span></div>
+      `;
+    } else if (tool === 'distance') {
+      const px = dist(points[0], points[1]);
+      box.innerHTML = `
+        <div class="flex justify-between"><span>Distância pixel:</span><span class="font-mono">${px.toFixed(1)} px</span></div>
+        <div class="flex justify-between"><span>Distância real:</span><span class="font-mono font-bold">${formatReal(px)}</span></div>
+      `;
+    } else if (tool === 'radius') {
+      const center = circleCenter(points[0], points[1], points[2]);
+      if (!center) {
+        box.innerHTML = '<div class="text-red-500">Pontos colineares. Não é possível definir um círculo.</div>';
+        return;
+      }
+      const rPx = dist(center, points[0]);
+      const dPx = rPx * 2;
+      box.innerHTML = `
+        <div class="flex justify-between"><span>Raio:</span><span class="font-mono font-bold">${formatReal(rPx)}</span></div>
+        <div class="flex justify-between"><span>Diâmetro:</span><span class="font-mono font-bold">${formatReal(dPx)}</span></div>
+        <div class="flex justify-between"><span>Centro:</span><span class="font-mono">(${center.x.toFixed(1)}, ${center.y.toFixed(1)}) px</span></div>
+      `;
+    }
+  }
+  
+  let isCalibrating = false;
+  
+  overlay.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    if (!stream && !photo.src) return;
+    
+    const pos = getPointerPos(e);
+    const imgPos = toImageCoords(pos.x, pos.y);
+    
+    if (isCalibrating) {
+      points.push(imgPos);
+      draw();
+      if (points.length === 2) {
+        const px = dist(points[0], points[1]);
+        const real = parseFloat(document.getElementById('real-dist').value) || 1;
+        scalePxPerUnit = px / real;
+        scaleUnit = document.getElementById('real-unit').value;
+        document.getElementById('scale-display').textContent = `${scalePxPerUnit.toFixed(2)} px/${scaleUnit}`;
+        document.getElementById('btn-calibrate').textContent = '✅ Recalibrar';
+        points = [];
+        isCalibrating = false;
+        document.getElementById('calib-status').classList.add('hidden');
+        updateResults();
+      }
+      return;
+    }
+    
+    const t = TOOLS[tool];
+    if (points.length >= t.max) points = [];
+    points.push(imgPos);
+    draw();
+    if (points.length === t.max) updateResults();
+    else updateResults();
+  });
+  
+  document.querySelectorAll('.tool-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      tool = btn.dataset.tool;
+      points = [];
+      document.getElementById('tool-help').textContent = TOOLS[tool].help;
+      draw();
+      updateResults();
+    });
+  });
+  
+  async function startCamera() {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+      video.srcObject = stream;
+      video.classList.remove('hidden');
+      photo.classList.add('hidden');
+      emptyState.classList.add('hidden');
+      document.getElementById('btn-start').classList.add('hidden');
+      document.getElementById('btn-freeze').classList.remove('hidden');
+      document.getElementById('btn-file').classList.add('hidden');
+      video.onloadedmetadata = () => {
+        resizeOverlay();
+        document.getElementById('res-display').textContent = `${video.videoWidth}x${video.videoHeight}`;
+      };
+    } catch (err) {
+      console.error(err);
+      showPermissionModal(err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError');
+    }
+  }
+  
+  function showPermissionModal(denied) {
+    const existing = document.getElementById('permission-modal');
+    if (existing) existing.remove();
+    const div = document.createElement('div');
+    div.id = 'permission-modal';
+    div.className = 'modal-overlay';
+    div.innerHTML = `
+      <div class="modal-box">
+        <h2 class="text-xl font-bold text-gray-800 mb-2">🎥 Acesso à câmera necessário</h2>
+        <p class="text-sm text-gray-600 mb-4">O aplicativo precisa usar a câmera para medir ângulos e dimensões diretamente sobre a imagem.</p>
+        ${denied ? `
+          <div class="bg-red-50 text-red-700 text-sm p-3 rounded-lg mb-4">
+            Parece que o acesso foi bloqueado. Siga os passos abaixo para liberar:
+          </div>
+          <div class="permission-step"><span>1</span><p class="text-sm text-gray-700"><b>Android/Chrome:</b> toque no cadeado ao lado da URL → Permissões → Câmera → Permitir.</p></div>
+          <div class="permission-step"><span>2</span><p class="text-sm text-gray-700"><b>iPhone/Safari:</b> Ajustes → Safari → Câmera → escolha "Permitir" para este site.</p></div>
+          <div class="permission-step"><span>3</span><p class="text-sm text-gray-700"><b>Desktop:</b> clique no ícone de câmera na barra de endereço e escolha "Permitir".</p></div>
+        ` : `
+          <div class="permission-step"><span>1</span><p class="text-sm text-gray-700">Ao clicar em "Tentar novamente", o navegador vai perguntar se você permite o uso da câmera.</p></div>
+          <div class="permission-step"><span>2</span><p class="text-sm text-gray-700">Escolha <b>Permitir</b> para continuar.</p></div>
+        `}
+        <div class="flex gap-2 mt-4">
+          <button id="modal-retry" class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">Tentar novamente</button>
+          <button id="modal-file" class="flex-1 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700">Usar imagem</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(div);
+    document.getElementById('modal-retry').addEventListener('click', () => {
+      div.remove();
+      startCamera();
+    });
+    document.getElementById('modal-file').addEventListener('click', () => {
+      div.remove();
+      document.getElementById('file-input').click();
+    });
+  }
+  
+  document.getElementById('btn-start').addEventListener('click', startCamera);
+  
+  window.addEventListener('load', () => {
+    if (!photo.src) startCamera();
+  });
+  
+  document.getElementById('btn-freeze').addEventListener('click', () => {
+    if (!stream) return;
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0);
+    photo.src = canvas.toDataURL('image/png');
+    photo.classList.remove('hidden');
+    video.classList.add('hidden');
+    stream.getTracks().forEach(t => t.stop());
+    stream = null;
+    isFrozen = true;
+    document.getElementById('btn-freeze').classList.add('hidden');
+    document.getElementById('btn-resume').classList.remove('hidden');
+    setTimeout(resizeOverlay, 50);
+  });
+  
+  document.getElementById('btn-resume').addEventListener('click', () => {
+    document.getElementById('btn-start').click();
+    document.getElementById('btn-resume').classList.add('hidden');
+    isFrozen = false;
+    photo.src = '';
+    photo.classList.add('hidden');
+  });
+  
+  document.getElementById('btn-file').addEventListener('click', () => document.getElementById('file-input').click());
+  
+  document.getElementById('file-input').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    photo.src = url;
+    photo.classList.remove('hidden');
+    video.classList.add('hidden');
+    emptyState.classList.add('hidden');
+    document.getElementById('btn-start').classList.add('hidden');
+    document.getElementById('btn-freeze').classList.add('hidden');
+    document.getElementById('btn-resume').classList.add('hidden');
+    document.getElementById('btn-file').textContent = '📁 Trocar Imagem';
+    isFrozen = true;
+    photo.onload = () => {
+      resizeOverlay();
+      document.getElementById('res-display').textContent = `${photo.naturalWidth}x${photo.naturalHeight}`;
+    };
+  });
+  
+  document.getElementById('btn-calibrate').addEventListener('click', () => {
+    if (isCalibrating) {
+      isCalibrating = false;
+      points = [];
+      draw();
+      document.getElementById('calib-status').classList.add('hidden');
+      return;
+    }
+    isCalibrating = true;
+    points = [];
+    draw();
+    document.getElementById('calib-status').classList.remove('hidden');
+  });
+  
+  function getActiveImageData() {
+    const source = isFrozen || photo.src ? photo : video;
+    if (!source.videoWidth && !source.naturalWidth) return null;
+    const w = source.videoWidth || source.naturalWidth;
+    const h = source.videoHeight || source.naturalHeight;
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    c.getContext('2d').drawImage(source, 0, 0);
+    return { canvas: c, ctx: c.getContext('2d'), width: w, height: h };
+  }
+  
+  function detectCalibrationObject() {
+    const data = getActiveImageData();
+    if (!data) { alert('Inicie a câmera ou carregue uma imagem primeiro.'); return; }
+    const { canvas, ctx: imgCtx, width, height } = data;
+    const imgData = imgCtx.getImageData(0, 0, width, height);
+    const gray = new Uint8Array(width * height);
+    for (let i = 0; i < imgData.data.length; i += 4) {
+      gray[i / 4] = 0.299 * imgData.data[i] + 0.587 * imgData.data[i+1] + 0.114 * imgData.data[i+2];
+    }
+    
+    function sobel(idx) {
+      const x = idx % width, y = Math.floor(idx / width);
+      if (x < 1 || x >= width - 1 || y < 1 || y >= height - 1) return 0;
+      let gx = 0, gy = 0;
+      const kernelX = [-1,0,1,-2,0,2,-1,0,1];
+      const kernelY = [-1,-2,-1,0,0,0,1,2,1];
+      for (let ky = -1; ky <= 1; ky++) {
+        for (let kx = -1; kx <= 1; kx++) {
+          const v = gray[(y+ky)*width + (x+kx)];
+          gx += v * kernelX[(ky+1)*3 + (kx+1)];
+          gy += v * kernelY[(ky+1)*3 + (kx+1)];
+        }
+      }
+      return Math.hypot(gx, gy);
+    }
+    
+    const edges = new Float32Array(width * height);
+    let maxEdge = 0;
+    for (let i = 0; i < edges.length; i++) {
+      edges[i] = sobel(i);
+      if (edges[i] > maxEdge) maxEdge = edges[i];
+    }
+    const threshold = maxEdge * 0.15;
+    
+    const candidates = [];
+    const step = 12;
+    for (let y = step; y < height - step; y += step) {
+      for (let x = step; x < width - step; x += step) {
+        const e = edges[y*width + x];
+        if (e > threshold) {
+          let localMax = e, lx = x, ly = y;
+          for (let dy = -step; dy <= step; dy++) {
+            for (let dx = -step; dx <= step; dx++) {
+              const nx = x + dx, ny = y + dy;
+              if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+              if (edges[ny*width + nx] > localMax) { localMax = edges[ny*width + nx]; lx = nx; ly = ny; }
+            }
+          }
+          candidates.push({ x: lx, y: ly, mag: localMax });
+        }
+      }
+    }
+    
+    candidates.sort((a, b) => b.mag - a.mag);
+    const unique = [];
+    const minDist = width * 0.08;
+    for (const p of candidates) {
+      if (unique.some(u => Math.hypot(u.x - p.x, u.y - p.y) < minDist)) continue;
+      unique.push(p);
+      if (unique.length >= 2) break;
+    }
+    
+    if (unique.length < 2) {
+      alert('Não foi possível detectar bordas claras automaticamente. Use a calibração manual com 2 pontos.');
+      return;
+    }
+    
+    points = unique;
+    draw();
+    
+    const px = dist(points[0], points[1]);
+    const real = parseFloat(document.getElementById('real-dist').value) || 1;
+    scalePxPerUnit = px / real;
+    scaleUnit = document.getElementById('real-unit').value;
+    document.getElementById('scale-display').textContent = `${scalePxPerUnit.toFixed(2)} px/${scaleUnit}`;
+    document.getElementById('btn-calibrate').textContent = '✅ Recalibrar';
+    
+    const msg = document.createElement('div');
+    msg.className = 'fixed bottom-4 left-1/2 transform -translate-x-1/2 bg-green-700 text-white px-4 py-2 rounded-full text-sm shadow-lg z-50';
+    msg.textContent = `Calibração automática detectada: ${(px/scalePxPerUnit).toFixed(2)} ${scaleUnit}`;
+    document.body.appendChild(msg);
+    setTimeout(() => msg.remove(), 3000);
+    
+    setTimeout(() => { points = []; draw(); updateResults(); }, 500);
+  }
+  
+  document.getElementById('btn-auto-calibrate').addEventListener('click', detectCalibrationObject);
+  
+  document.getElementById('grid-toggle').addEventListener('change', (e) => {
+    showGrid = e.target.checked;
+    drawGrid();
+  });
+  
+  document.getElementById('btn-undo').addEventListener('click', () => {
+    points.pop();
+    draw();
+    updateResults();
+  });
+  
+  document.getElementById('btn-clear').addEventListener('click', () => {
+    points = [];
+    draw();
+    updateResults();
+  });
+  
+  window.addEventListener('resize', () => {
+    resizeOverlay();
+    draw();
+  });
+  
+  updateResults();
+</script>
+</body>
+</html>
+</script>
+
+</body>
+</html>
